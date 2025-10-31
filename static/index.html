@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Gemini Live Audio Test</title>
+</head>
+<body>
+  <h2>🎧 Gemini Live Audio Test</h2>
+  <button id="start">🎙️ Start Session</button>
+  <button id="stop">🛑 Stop</button>
+  <audio id="player" autoplay controls></audio>
+
+  <script>
+    let ws;
+    let mediaRecorder;
+    let audioChunks = [];
+
+    document.getElementById("start").onclick = async () => {
+      ws = new WebSocket("ws://127.0.0.1:8000/ws/live-audio");
+
+      ws.onopen = async () => {
+        console.log("✅ Connected to backend");
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+
+        mediaRecorder.ondataavailable = async (event) => {
+          const arrayBuffer = await event.data.arrayBuffer();
+          ws.send(arrayBuffer);
+        };
+
+        mediaRecorder.start(200); // send every 200ms
+      };
+
+      ws.onmessage = async (msg) => {
+        if (typeof msg.data !== "string") {
+          const audioBlob = new Blob([msg.data], { type: "audio/wav" });
+          const url = URL.createObjectURL(audioBlob);
+          const player = document.getElementById("player");
+          player.src = url;
+        } else {
+          console.log("Server:", msg.data);
+        }
+      };
+    };
+
+    document.getElementById("stop").onclick = () => {
+      if (mediaRecorder && mediaRecorder.state !== "inactive") {
+        mediaRecorder.stop();
+      }
+      if (ws) ws.close();
+    };
+  </script>
+</body>
+</html>
