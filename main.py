@@ -18,4 +18,4 @@ async def serve_index():
 
 @app.get("/health-check")
 def health_check():
-    return {"status": "✅ API is running!"}
+    return {"status": " API is running!"}

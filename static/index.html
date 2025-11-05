@@ -1,53 +1,148 @@
-<!DOCTYPE html>
-<html>
-<head>
-  <title>Gemini Live Audio Test</title>
-</head>
-<body>
-  <h2>🎧 Gemini Live Audio Test</h2>
-  <button id="start">🎙️ Start Session</button>
-  <button id="stop">🛑 Stop</button>
-  <audio id="player" autoplay controls></audio>
-
-  <script>
-    let ws;
-    let mediaRecorder;
-    let audioChunks = [];
-
-    document.getElementById("start").onclick = async () => {
-      ws = new WebSocket("ws://127.0.0.1:8000/ws/live-audio");
-
-      ws.onopen = async () => {
-        console.log("✅ Connected to backend");
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
-
-        mediaRecorder.ondataavailable = async (event) => {
-          const arrayBuffer = await event.data.arrayBuffer();
-          ws.send(arrayBuffer);
-        };
-
-        mediaRecorder.start(200); // send every 200ms
-      };
-
-      ws.onmessage = async (msg) => {
-        if (typeof msg.data !== "string") {
-          const audioBlob = new Blob([msg.data], { type: "audio/wav" });
-          const url = URL.createObjectURL(audioBlob);
-          const player = document.getElementById("player");
-          player.src = url;
-        } else {
-          console.log("Server:", msg.data);
-        }
-      };
-    };
-
-    document.getElementById("stop").onclick = () => {
-      if (mediaRecorder && mediaRecorder.state !== "inactive") {
-        mediaRecorder.stop();
-      }
-      if (ws) ws.close();
-    };
-  </script>
+<body style="font-family: sans-serif; text-align: center; margin-top: 100px;">
+  <h2> Gemini Live Audio</h2>
+  <button id="start" style="padding:10px 20px;">Start</button>
+  <button id="stop" style="padding:10px 20px;">Stop</button>
+  <p id="status">Status: Idle</p>
 </body>
-</html>
+
+<script>
+let ws;
+let audioContext;
+let processor;
+let input;
+let globalStream;
+
+let playbackQueue = [];
+let isPlaying = false;
+
+//  Convert 16-bit PCM to Float32
+function int16ToFloat32(int16Array) {
+  const float32Array = new Float32Array(int16Array.length);
+  for (let i = 0; i < int16Array.length; i++) {
+    float32Array[i] = int16Array[i] / 0x7fff;
+  }
+  return float32Array;
+}
+
+// Downsample 48kHz → 16kHz (for Gemini input)
+function downsampleBuffer(buffer, rate = 48000, targetRate = 16000) {
+  if (rate === targetRate) return buffer;
+  const sampleRateRatio = rate / targetRate;
+  const newLength = Math.round(buffer.length / sampleRateRatio);
+  const result = new Float32Array(newLength);
+  let offsetResult = 0, offsetBuffer = 0;
+  while (offsetResult < result.length) {
+    const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
+    let accum = 0, count = 0;
+    for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+      accum += buffer[i];
+      count++;
+    }
+    result[offsetResult] = accum / count;
+    offsetResult++;
+    offsetBuffer = nextOffsetBuffer;
+  }
+  return result;
+}
+
+//  Convert Float32 → PCM16
+function floatTo16BitPCM(float32Array) {
+  const buffer = new ArrayBuffer(float32Array.length * 2);
+  const view = new DataView(buffer);
+  let offset = 0;
+  for (let i = 0; i < float32Array.length; i++, offset += 2) {
+    let s = Math.max(-1, Math.min(1, float32Array[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return buffer;
+}
+
+//  Playback queue processor — plays each audio chunk smoothly
+async function playQueue() {
+  if (isPlaying || playbackQueue.length === 0) return;
+  isPlaying = true;
+
+  const chunk = playbackQueue.shift();
+  try {
+    const float32 = int16ToFloat32(chunk);
+    const sampleRate = 24000;
+    const buffer = audioContext.createBuffer(1, float32.length, sampleRate);
+    buffer.copyToChannel(float32, 0);
+
+    const src = audioContext.createBufferSource();
+    src.buffer = buffer;
+    src.connect(audioContext.destination);
+    src.onended = () => {
+      isPlaying = false;
+      if (playbackQueue.length > 0) playQueue();
+    };
+    src.start();
+  } catch (e) {
+    console.error("Playback error:", e);
+    isPlaying = false;
+  }
+}
+
+// Start button
+document.getElementById("start").onclick = async () => {
+  ws = new WebSocket("ws://127.0.0.1:8000/ws/live-audio");
+  ws.binaryType = "arraybuffer";
+
+  ws.onopen = async () => {
+    console.log("WebSocket connected");
+    document.getElementById("status").innerText = "Status: Connected";
+
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    globalStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const source = audioContext.createMediaStreamSource(globalStream);
+
+    processor = audioContext.createScriptProcessor(1024, 1, 1);
+    processor.onaudioprocess = (e) => {
+      const floatData = e.inputBuffer.getChannelData(0);
+      const downsampled = downsampleBuffer(floatData, audioContext.sampleRate, 16000);
+      const pcm16 = floatTo16BitPCM(downsampled);
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(pcm16);
+    };
+
+    source.connect(processor);
+    processor.connect(audioContext.destination);
+    console.log("Started streaming mic audio to server");
+  };
+
+  ws.onmessage = async (evt) => {
+    if (typeof evt.data === "string") {
+      console.log("Text message:", evt.data);
+      return;
+    }
+
+    // binary = Gemini's PCM audio chunk
+    const arr = new Int16Array(await evt.data);
+    playbackQueue.push(arr);
+    playQueue();
+  };
+
+  ws.onclose = () => {
+    console.log("🔌 WebSocket disconnected");
+    document.getElementById("status").innerText = "Status: Disconnected";
+  };
+};
+
+// ⏹ Stop button
+document.getElementById("stop").onclick = () => {
+  if (processor) {
+    processor.disconnect();
+    processor = null;
+  }
+  if (globalStream) {
+    globalStream.getTracks().forEach((t) => t.stop());
+    globalStream = null;
+  }
+  if (ws) {
+    ws.close();
+    ws = null;
+  }
+  playbackQueue = [];
+  isPlaying = false;
+  document.getElementById("status").innerText = "Status: Stopped";
+};
+</script>
