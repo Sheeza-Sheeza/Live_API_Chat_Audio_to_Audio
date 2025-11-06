@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 import asyncio
 import traceback
@@ -55,6 +56,8 @@ class GeminiLiveAudioService:
                 ],
             ),
             response_modalities=["AUDIO"],
+            input_audio_transcription={},
+            output_audio_transcription={},
             thinking_config=types.ThinkingConfig(
             thinking_budget=0,
             include_thoughts=False,
@@ -124,7 +127,7 @@ class GeminiLiveAudioService:
                 if not data:
                     continue
 
-                # ✅ Check if the websocket is still connected before sending
+                # Check if the websocket is still connected before sending
                 if websocket.client_state.name != "CONNECTED":
                     logger.info("WebSocket closed — stopping audio send loop.")
                     break
@@ -138,7 +141,7 @@ class GeminiLiveAudioService:
         except Exception as e:
             logger.error(f"send_gemini_audio_to_client error: {e}")
         finally:
-            # ✅ Ensure socket is closed gracefully
+            #  Ensure socket is closed gracefully
             if websocket.client_state.name == "CONNECTED":
                 await websocket.close()
             logger.info("Audio send loop ended.")
@@ -146,19 +149,46 @@ class GeminiLiveAudioService:
 
 
     async def receive_audio(self):
-        """ Receive audio/text responses from Gemini."""
+        """Receive audio/text responses from Gemini."""
         logger.info(" Receiving Gemini responses...")
+   
+        user_text = []
+        gemini_text = []
+
         while True:
             try:
-                turn = self.session.receive()
-                async for response in turn:
-                    if data := response.data:
-                        self.audio_in_queue.put_nowait(data)
-                    #if text := response.text:
-                        #logger.info(f" Gemini says: {text.strip()}")
+                async for response in self.session.receive():
+
+                    if response.server_content:
+                        #  Stream Gemini audio data to playback queue
+                        if response.data:
+                            self.audio_in_queue.put_nowait(response.data)
+
+                        #  Input transcription (what user said)
+                        if response.server_content.input_transcription:
+                            text = response.server_content.input_transcription.text
+                            
+                            user_text.append(text)
+                        if user_text:
+                            print(" ".join(user_text))
+                        
+                          
+
+                        #  Output transcription (Gemini's response)
+                        if response.server_content.output_transcription:
+                            text = response.server_content.output_transcription.text
+                            # print(" Output transcript:", text)
+                            gemini_text.append(text)
+
+                        if gemini_text:
+                            print(" ".join(gemini_text))
+                             
+                    
             except Exception as e:
                 logger.error(f" receive_audio error: {e}")
+                break
 
+       
     # async def play_audio(self):
     #     """ Play Gemini’s audio responses."""
     #     try:
@@ -187,7 +217,7 @@ class GeminiLiveAudioService:
                 logger.info("Connected to Gemini Live API!")
                 self.session = session
                 self.audio_in_queue = asyncio.Queue()
-                self.out_queue = asyncio.Queue(maxsize=5)
+                self.out_queue = asyncio.Queue(maxsize=15)
 
                 tg.create_task(self.send_realtime())
                 tg.create_task(self.receive_audio())
